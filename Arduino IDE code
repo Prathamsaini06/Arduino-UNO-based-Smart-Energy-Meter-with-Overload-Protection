@@ -1,0 +1,143 @@
+#include <LiquidCrystal.h>
+#include "EmonLib.h"
+
+// ---------- Pin mapping (your connections) ----------
+LiquidCrystal lcd(13, 12, 11, 10, 9, 8);   // RS, E, D4, D5, D6, D7
+const uint8_t VOLT_PIN   = A0;             // voltage sensing circuit
+const uint8_t CURR_PIN   = A1;             // ACS712-30A
+const uint8_t LED_GREEN  = 7;
+const uint8_t LED_YELLOW = 6;
+const uint8_t LED_RED    = 5;
+const uint8_t RELAY_PIN  = 4;              // HIGH = relay ON (supply connected)
+
+// ---------- Calibration ----------
+const float VOLT_CAL   = 243.46;            // your voltage calibration
+const float VOLT_PHASE = 1.7;
+const float CURR_CAL   = 0.066;            // ACS712-30A: 1 / 0.1 V per A
+
+// ---------- Protection settings (change these for your loads) ----------
+const float OVERLOAD_A = 0.5;              // trip current in amps
+const float WARN_A     = 0.80 * OVERLOAD_A; // yellow zone starts at 80% of trip
+const unsigned long RETRY_MS = 10000;      // auto-reconnect after 10 s (0 = stay off until reset)
+
+// ---------- Tariff ----------
+const float TARIFF_RS_PER_KWH = 7.0;      // Rs per unit (kWh)
+
+EnergyMonitor emon;
+
+float energy_kWh = 0;
+unsigned long lastMs = 0;
+unsigned long tripMs = 0;
+unsigned long pageMs = 0;
+bool page2 = false;
+bool tripped = false;
+uint8_t overCount = 0;
+
+void setLeds(bool g, bool y, bool r) {
+  digitalWrite(LED_GREEN,  g);
+  digitalWrite(LED_YELLOW, y);
+  digitalWrite(LED_RED,    r);
+}
+
+void printLine(uint8_t row, const char *txt) {
+  char buf[17];
+  snprintf(buf, sizeof(buf), "%-16s", txt);   // pad to 16 chars, no lcd.clear() flicker
+  lcd.setCursor(0, row);
+  lcd.print(buf);
+}
+
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(LED_GREEN, OUTPUT);
+  pinMode(LED_YELLOW, OUTPUT);
+  pinMode(LED_RED, OUTPUT);
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH);              // supply ON at start
+
+  emon.voltage(VOLT_PIN, VOLT_CAL, VOLT_PHASE);
+  emon.current(CURR_PIN, CURR_CAL);
+
+  lcd.begin(16, 2);                           // 16x2 LCD
+  printLine(0, "Smart Energy");
+  printLine(1, "Meter Starting..");
+  delay(1500);
+
+  lastMs = millis();
+  pageMs = millis();
+}
+
+void loop() {
+  // Measure: 20 half-wavelengths, 2 s timeout
+  emon.calcVI(20, 2000);
+  float V = emon.Vrms;
+  float I = emon.Irms;
+  float P = emon.realPower;
+
+  if (I < 0.03) { I = 0; P = 0; }             // remove noise at no load
+  if (P < 0) P = 0;
+
+  // Energy and cost
+  unsigned long now = millis();
+  unsigned long dt = now - lastMs;
+  lastMs = now;
+  energy_kWh += (P * dt) / 3.6e9;             // W * ms -> kWh
+  float cost = energy_kWh * TARIFF_RS_PER_KWH;
+
+  // Protection logic
+  const char *status;
+  if (tripped) {
+    digitalWrite(RELAY_PIN,LOW );
+    setLeds(false, false, true);
+    status = "OVERLOAD-CUT OFF";
+    if (RETRY_MS > 0 && (now - tripMs) >= RETRY_MS) {
+      tripped = false;                        // try reconnecting
+      overCount = 0;
+      digitalWrite(RELAY_PIN, HIGH );
+    }
+  } else {
+    if (I >= OVERLOAD_A) overCount++; else overCount = 0;
+
+    if (overCount >= 2) {                     // 2 readings in a row = real overload
+      tripped = true;
+      tripMs = now;
+      digitalWrite(RELAY_PIN, LOW);
+      setLeds(false, false, true);  //red led
+      status = "OVERLOAD-CUT OFF";
+    } else if (I >= WARN_A) {
+      setLeds(false, true, false); //yellow led
+      status = "WARNING: HIGH";
+    } else {
+      setLeds(true, false, false); //green led
+      status = "NORMAL";
+    }
+  }
+
+  // Display: alternate two pages every 3 s
+  if (now - pageMs >= 3000) {
+    page2 = !page2;
+    pageMs = now;
+  }
+
+  char l1[20], a[10], b[10];
+  if (!page2) {
+    dtostrf(V, 5, 1, a);
+    dtostrf(I, 4, 2, b);
+    snprintf(l1, sizeof(l1), "V:%sV I:%sA", a, b);
+    printLine(0, l1);
+    printLine(1, status);
+  } else {
+    dtostrf(energy_kWh, 7, 4, a);
+    snprintf(l1, sizeof(l1), "E:%s kWh", a);
+    printLine(0, l1);
+    dtostrf(cost, 6, 2, b);
+    snprintf(l1, sizeof(l1), "Cost: Rs%s", b);
+    printLine(1, l1);
+  }
+
+  Serial.print("V="); Serial.print(V);
+  Serial.print(" I="); Serial.print(I);
+  Serial.print(" P="); Serial.print(P);
+  Serial.print(" kWh="); Serial.print(energy_kWh, 4);
+  Serial.print(" Rs="); Serial.println(cost, 2);
+}
