@@ -1,0 +1,2 @@
+# Arduino-UNO-based-Smart-Energy-Meter-with-Overload-Protection
+Designed and simulated an Arduino UNO-based Smart Energy Meter with Overload Protection as part of an academic project in Microcontrollers and Embedded Systems.  The project focuses on real-time electrical parameter monitoring, energy consumption calculation, electricity cost estimation, and automatic load disconnection during overload conditions.
